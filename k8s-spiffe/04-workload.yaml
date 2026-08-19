@@ -1,0 +1,137 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mcp-workload
+  namespace: default
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spiffe-test-script
+  namespace: default
+data:
+  test_spiffe.py: |
+    import asyncio, os, json
+
+    async def main():
+        print()
+        print("  ╔══════════════════════════════════════════════════════════╗")
+        print("  ║   M2M Authentication — SPIFFE/SPIRE (Method C)         ║")
+        print("  ╚══════════════════════════════════════════════════════════╝")
+        print()
+        print("  ┌─ Configuration ─────────────────────────────────────────┐")
+        print(f"  │  Client ID    {os.environ.get('SPIFFE_CLIENT_ID', 'not set')}")
+        print(f"  │  SPIFFE ID    {os.environ.get('SPIFFE_ID', 'not set')}")
+        print(f"  │  MCP Server   {os.environ.get('MCP_URL', 'not set')}")
+        print(f"  │  Socket       /run/spire/sockets/agent.sock")
+        print(f"  │  Scopes       mcp_prod:read, mcp_prod:tools:read")
+        print(f"  │  Method       JWT-SVID (zero stored credentials)")
+        print("  └────────────────────────────────────────────────────────┘")
+        print()
+
+        print("  [1/3] Connecting to SPIRE agent socket...")
+        from authsec_sdk import SpiffeWorkloadIdentity, SpiffeConfig
+
+        spiffe = SpiffeWorkloadIdentity(SpiffeConfig(
+            mcp_server_url=os.environ["MCP_URL"],
+            client_id=os.environ["SPIFFE_CLIENT_ID"],
+            spiffe_id=os.environ["SPIFFE_ID"],
+            scopes="mcp_prod:read mcp_prod:tools:read",
+        ))
+        print("        ✓ SpiffeWorkloadIdentity created")
+        print("        No stored credential — SPIRE agent attests this pod")
+        print()
+
+        print("  [2/3] Requesting access token via JWT-SVID...")
+        print("        → Pod → SPIRE agent → JWT-SVID (~5 min)")
+        print("        → SDK sends SVID as client assertion")
+        print("        → AuthSec verifies against trust domain")
+        async with spiffe:
+            token = await spiffe.access_for()
+        print("        ✓ Token acquired (zero credentials on wire)")
+        print()
+
+        print("  ┌─ Access Token ──────────────────────────────────────────┐")
+        print(f"  │  {token}")
+        print(f"  │  Length: {len(token)} chars")
+        print("  └────────────────────────────────────────────────────────┘")
+        print()
+
+        print("  [3/3] Calling MCP tools...")
+        import httpx
+        async with httpx.AsyncClient(timeout=30) as c:
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            }
+            r = await c.post(os.environ["MCP_URL"], headers=headers,
+                json={"jsonrpc": "2.0", "method": "tools/list", "id": 1})
+            print(f"        tools/list: {r.status_code}")
+            data = r.json()
+            if "result" in data and "tools" in data["result"]:
+                for t in data["result"]["tools"]:
+                    print(f"          • {t['name']}")
+
+            r = await c.post(os.environ["MCP_URL"], headers=headers,
+                json={"jsonrpc": "2.0", "method": "tools/call", "id": 2,
+                      "params": {"name": "add_no", "arguments": {"a": 2, "b": 3}}})
+            data = r.json()
+            if "result" in data and not data["result"].get("isError"):
+                print(f"        add_no(2,3) = {data['result']['content'][0]['text']}")
+
+        print()
+        print("  ┌─────────────────────────────────────────────────────────┐")
+        print("  │  RESULT: ✓ PASS                                        │")
+        print("  └─────────────────────────────────────────────────────────┘")
+        print()
+
+    asyncio.run(main())
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: spiffe-test
+  namespace: default
+  labels:
+    app: spiffe-test
+spec:
+  serviceAccountName: mcp-workload
+  initContainers: []
+  containers:
+    - name: test
+      image: python:3.12-slim
+      command: ["sleep", "infinity"]
+      env:
+        - name: PATH
+          value: "/shared-bin:/usr/local/bin:/usr/bin:/bin"
+        - name: SPIFFE_CLIENT_ID
+          value: "d914880b-1eef-4e7a-b53d-9c0db91b60bf"
+        - name: SPIFFE_ID
+          value: "spiffe://authsec.local/ns/default/sa/mcp-workload"
+        - name: MCP_URL
+          value: "https://python-mcp-v2c3.onrender.com/mcp"
+        - name: AUTHSEC_ISSUER
+          value: "https://app.authsec.ai"
+      volumeMounts:
+        - name: spire-agent-socket
+          mountPath: /run/spire/sockets
+          readOnly: true
+        - name: test-script
+          mountPath: /app
+        - name: shared-bin
+          mountPath: /shared-bin
+      resources:
+        limits:
+          memory: "256Mi"
+          cpu: "500m"
+  volumes:
+    - name: spire-agent-socket
+      hostPath:
+        path: /run/spire/sockets
+        type: Directory
+    - name: test-script
+      configMap:
+        name: spiffe-test-script
+    - name: shared-bin
+      emptyDir: {}

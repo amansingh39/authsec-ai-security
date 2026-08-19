@@ -1,0 +1,38 @@
+============================================================
+  SPIFFE/SPIRE Test Deployment — Commands
+============================================================
+
+Step 1: Deploy SPIRE
+  kubectl apply -f k8s-spiffe/01-namespace.yaml
+  kubectl apply -f k8s-spiffe/02-spire-server.yaml
+  kubectl apply -f k8s-spiffe/03-spire-agent.yaml
+
+Step 2: Wait for SPIRE to be ready
+  kubectl -n spire wait --for=condition=ready pod -l app=spire-server --timeout=120s
+  kubectl -n spire wait --for=condition=ready pod -l app=spire-agent --timeout=120s
+
+Step 3: Register the workload in SPIRE
+  kubectl -n spire exec -it statefulset/spire-server -- /opt/spire/bin/spire-server entry create -spiffeID spiffe://authsec.local/ns/default/sa/mcp-workload -parentID spiffe://authsec.local/spire/agent/k8s_psat/docker-desktop -selector k8s:ns:default -selector k8s:sa:mcp-workload
+
+Step 4: Deploy the test pod
+  kubectl apply -f k8s-spiffe/04-workload.yaml
+
+Step 5: Install SDK in the pod and run test
+  kubectl exec -it spiffe-test -- pip install authsec-sdk httpx
+  kubectl exec -it spiffe-test -- python /app/test_spiffe.py
+
+============================================================
+  Dashboard Setup (before Step 5)
+============================================================
+
+1. Trusted Issuers → Add provider:
+   Kind:          SPIRE (SPIFFE)
+   Issuer URL:    (your SPIRE OIDC discovery URL)
+   Trust domain:  authsec.local
+
+2. Your app → Access → Add access → Kubernetes workload:
+   SPIFFE ID:     spiffe://authsec.local/ns/default/sa/mcp-workload
+   Role:          Viewer (or your role)
+
+3. Copy the SPIFFE_CLIENT_ID from step 2 and update:
+   kubectl set env pod/spiffe-test SPIFFE_CLIENT_ID=<the-id>

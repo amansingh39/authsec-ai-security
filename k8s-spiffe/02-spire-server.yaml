@@ -1,0 +1,187 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spire-server
+  namespace: spire
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: spire-server
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list"]
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: spire-server
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: spire-server
+subjects:
+  - kind: ServiceAccount
+    name: spire-server
+    namespace: spire
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spire-server-config
+  namespace: spire
+data:
+  server.conf: |
+    server {
+      bind_address = "0.0.0.0"
+      bind_port = "8081"
+      trust_domain = "authsec.local"
+      data_dir = "/run/spire/data"
+      log_level = "DEBUG"
+      ca_ttl = "24h"
+      default_x509_svid_ttl = "1h"
+      default_jwt_svid_ttl = "5m"
+      jwt_issuer = "https://from-move-definite.ngrok-free.dev"
+    }
+
+    plugins {
+      DataStore "sql" {
+        plugin_data {
+          database_type = "sqlite3"
+          connection_string = "/run/spire/data/datastore.sqlite3"
+        }
+      }
+      KeyManager "memory" {
+        plugin_data {}
+      }
+      NodeAttestor "k8s_psat" {
+        plugin_data {
+          clusters = {
+            "docker-desktop" = {
+              service_account_allow_list = ["spire:spire-agent"]
+            }
+          }
+        }
+      }
+    }
+  jwks-server.py: |
+    import http.server, subprocess, json, sys
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/.well-known/openid-configuration":
+                config = {
+                    "issuer": "https://from-move-definite.ngrok-free.dev",
+                    "jwks_uri": "https://from-move-definite.ngrok-free.dev/.well-known/jwks.json",
+                    "authorization_endpoint": "",
+                    "response_types_supported": ["id_token"],
+                    "subject_types_supported": ["public"],
+                    "id_token_signing_alg_values_supported": ["RS256", "ES256"],
+                }
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(config).encode())
+            elif self.path in ("/keys", "/.well-known/jwks.json"):
+                try:
+                    bundle = json.loads(open("/run/spire/bundle/bundle.json").read())
+                    jwks = {"keys": [k for k in bundle.get("keys", []) if k.get("use") == "jwt-svid"]}
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps(jwks).encode())
+                except Exception as e:
+                    self.send_response(500)
+                    self.end_headers()
+                    self.wfile.write(str(e).encode())
+            else:
+                self.send_response(404)
+                self.end_headers()
+        def log_message(self, format, *args):
+            print(f"OIDC: {args[0]}", flush=True)
+
+    http.server.HTTPServer(("0.0.0.0", 8008), Handler).serve_forever()
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: spire-server
+  namespace: spire
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spire-server
+  serviceName: spire-server
+  template:
+    metadata:
+      labels:
+        app: spire-server
+    spec:
+      serviceAccountName: spire-server
+      containers:
+        - name: spire-server
+          image: ghcr.io/spiffe/spire-server:1.12.1
+          args: ["-config", "/run/spire/config/server.conf"]
+          ports:
+            - containerPort: 8081
+          volumeMounts:
+            - name: config
+              mountPath: /run/spire/config
+              readOnly: true
+            - name: data
+              mountPath: /run/spire/data
+        - name: oidc-jwks
+          image: python:3.12-slim
+          command: ["python", "/run/spire/config/jwks-server.py"]
+          ports:
+            - containerPort: 8008
+          volumeMounts:
+            - name: config
+              mountPath: /run/spire/config
+              readOnly: true
+            - name: bundle
+              mountPath: /run/spire/bundle
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: spire-server-config
+        - name: data
+          emptyDir: {}
+        - name: bundle
+          configMap:
+            name: spire-bundle
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spire-server
+  namespace: spire
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8081
+      targetPort: 8081
+      name: grpc
+  selector:
+    app: spire-server
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spire-oidc
+  namespace: spire
+spec:
+  type: NodePort
+  ports:
+    - port: 8008
+      targetPort: 8008
+      nodePort: 30080
+      name: oidc
+  selector:
+    app: spire-server

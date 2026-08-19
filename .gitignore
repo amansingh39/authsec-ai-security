@@ -1,0 +1,9 @@
+venv/
+__pycache__/
+.env
+private_key.pem
+public_key.pem
+last_token.txt
+render-mcp-server/
+k8s-spiffe/bundle.json
+k8s-spiffe/bundle_clean.json

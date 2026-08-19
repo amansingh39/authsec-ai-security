@@ -1,0 +1,7 @@
+authsec-sdk>=4.7.1
+fastapi
+uvicorn
+python-dotenv
+mcp
+httpx
+cryptography

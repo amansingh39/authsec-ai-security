@@ -1,0 +1,82 @@
+============================================================
+  AuthSec Python SDK — Test Commands
+============================================================
+
+SETUP (one time):
+  .\venv\Scripts\Activate.ps1
+  pip install -r requirements.txt
+
+MCP SERVER (skip if using Render at python-mcp-v2c3.onrender.com):
+  python -m uvicorn server:app --host 0.0.0.0 --port 8000
+
+============================================================
+  Tests (run from project root)
+============================================================
+
+  01  Protect MCP Server (verifies PRM + rejects unauthenticated):
+      python tests/01_protect_mcp_server.py
+
+  02  M2M Client Secret — Method A:
+      python tests/02_m2m_client_secret.py
+
+  03  M2M Private-key JWT — Method B:
+      python tests/03_m2m_private_key_jwt.py
+
+  04  M2M SPIFFE/SPIRE — Method C (Kubernetes only):
+      kubectl exec spiffe-test -- python /app/test_spiffe.py
+
+  05  ID-JAG Delegation (opens browser for login):
+      python tests/05_idjag_delegation.py
+
+============================================================
+  Tools
+============================================================
+
+  Generate RSA keys for Method B:
+      python tools/generate_keys.py
+
+  DeepSeek AI Agent (ID-JAG + chat):
+      python tools/agent.py
+
+============================================================
+  SPIFFE/SPIRE Setup (Method C) — Kubernetes
+============================================================
+
+Prerequisites:
+  - Docker Desktop with Kubernetes enabled
+  - ngrok (from-move-definite.ngrok-free.dev)
+
+Step 1: Deploy SPIRE
+  kubectl apply -f k8s-spiffe/01-namespace.yaml
+  kubectl apply -f k8s-spiffe/02-spire-server.yaml
+  kubectl apply -f k8s-spiffe/03-spire-agent.yaml
+  kubectl -n spire get pods  (wait for Running)
+
+Step 2: Refresh bundle (after every server restart)
+  PowerShell:
+    $bundle = kubectl -n spire exec spire-server-0 -c spire-server -- /opt/spire/bin/spire-server bundle show -format spiffe
+    $bundleStr = $bundle -join "`n"
+    [System.IO.File]::WriteAllText("k8s-spiffe\bundle_clean.json", $bundleStr, [System.Text.UTF8Encoding]::new($false))
+    kubectl -n spire delete configmap spire-bundle
+    kubectl create configmap spire-bundle --from-file=bundle.json=k8s-spiffe\bundle_clean.json -n spire
+
+Step 3: Restart OIDC sidecar
+    kubectl -n spire delete pod spire-server-0
+    (wait for 2/2 Running, then redo Step 2)
+
+Step 4: Create workload entry
+    kubectl -n spire exec spire-server-0 -c spire-server -- /opt/spire/bin/spire-server agent list
+    kubectl -n spire exec spire-server-0 -c spire-server -- /opt/spire/bin/spire-server entry create \
+      -spiffeID spiffe://authsec.local/ns/default/sa/mcp-workload \
+      -parentID <AGENT_SPIFFE_ID> \
+      -selector k8s:ns:default -selector k8s:sa:mcp-workload
+
+Step 5: Port-forward + ngrok (two terminals)
+    kubectl -n spire port-forward pod/spire-server-0 9091:8008
+    ngrok http http://localhost:9091 --domain=from-move-definite.ngrok-free.dev
+
+Step 6: Verify + run
+    curl https://from-move-definite.ngrok-free.dev/.well-known/jwks.json
+    kubectl apply -f k8s-spiffe/04-workload.yaml
+    kubectl exec spiffe-test -- pip install authsec-sdk httpx
+    kubectl exec spiffe-test -- python /app/test_spiffe.py
